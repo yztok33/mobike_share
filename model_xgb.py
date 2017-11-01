@@ -12,8 +12,7 @@ import geohash
 import numpy as np
 import pandas as pd
 from pandas import Series,DataFrame
-#单独给她一个文件夹
-path='C:/Users/Administrator/Desktop/competition/mobike/mine0823'
+path='C:/Users/Administrator/Desktop/competition/mobike'
 os.chdir(path)
 
 cache_path = 'mobike_cache1'
@@ -38,7 +37,6 @@ def rank(data, feat1, feat2, ascending):
     data['rank'] = range(data.shape[0])
     min_rank = data.groupby(feat1,as_index=False)['rank'].agg({'min_rank':'min'})
     data = pd.merge(data,min_rank,on=feat1,how='left')
-    #tao---得到每一个订单目的地概率排序值（0，1，2...）
     data['rank'] = data['rank'] - data['min_rank']
     del data['min_rank']
     return data
@@ -48,7 +46,6 @@ def reshape(pred):
     result = pred.copy()
     result = rank(result,'orderid','pred',ascending=False)
     result = result[result['rank']<3][['orderid','geohashed_end_loc','rank']]
-    #tao---针对三个变量时特别有用
     result = result.set_index(['orderid','rank']).unstack()
     result.reset_index(inplace=True)
     result['orderid'] = result['orderid'].astype('int')
@@ -67,7 +64,6 @@ def get_label(data):
         test = pd.read_csv(test_path)   
         test['geohashed_end_loc'] = np.nan
         merge = pd.concat([train,test])
-        #tao---不用.values可得到同样结果
         true = dict(zip(merge['orderid'].values, merge['geohashed_end_loc']))
         pickle.dump(true, open(result_path, 'wb+'))
     data['label'] = data['orderid'].map(true)
@@ -117,7 +113,7 @@ def get_loc_to_loc(train,test):
     return result
 
 
-# 获取用户历史行为次数  tao--去过多少次
+# 获取用户历史行为次数  
 def get_user_count(train,result):
     user_count = train.groupby('userid',as_index=False)['geohashed_end_loc'].agg({'user_count':'count'})
     result = pd.merge(result,user_count,on=['userid'],how='left')
@@ -195,12 +191,10 @@ def get_sample(train,test):
                             user_start_loc[['orderid', 'geohashed_end_loc']],
                             loc_to_loc[['orderid', 'geohashed_end_loc']],  
                             ]).drop_duplicates()
-        # 根据end_loc添加标签(0,1)--把多分类问题转成了分类（概率）类型
         test_temp = test.copy()
         test_temp.rename(columns={'geohashed_end_loc': 'label'}, inplace=True)
         result = pd.merge(result, test_temp, on='orderid', how='left')
         result['label'] = (result['label'] == result['geohashed_end_loc']).astype(int)
-        # 删除起始地点和目的地点相同的样本  和 异常值
         result = result[result['geohashed_end_loc'] != result['geohashed_start_loc']]
         result = result[(~result['geohashed_end_loc'].isnull()) & (~result['geohashed_start_loc'].isnull())]
         result.to_hdf(result_path, 'w', complib='blosc', complevel=5)
