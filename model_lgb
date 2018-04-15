@@ -95,10 +95,9 @@ def rank(data, feat1, feat2, ascending):
 
 
 def reshape(pred):
-    result = pred[['orderid','geohashed_end_loc','pred']].copy() #我小小改动了
+    result = pred[['orderid','geohashed_end_loc','pred']].copy() 
     result = rank(result,'orderid','pred',ascending=False)
     result = result[result['rank']<3][['orderid','geohashed_end_loc','rank']]
-    #tao---针对三个变量时特别有用
     result = result.set_index(['orderid','rank']).unstack()
     result.reset_index(inplace=True)
     result['orderid'] = result['orderid'].astype('int')
@@ -322,7 +321,7 @@ def make_train_set(train,test):
         train = get_time_features(train)
         test = get_time_features(test)
         print('开始构造样本...')
-        result = get_sample(train,test)                                         # 构造备选样本
+        result = get_sample(train,test)                                        
     
         print('开始构造特征...')
         result = get_user_count(train,result)                                   # 获取用户历史行为次数
