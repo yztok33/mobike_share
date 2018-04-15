@@ -1,0 +1,486 @@
+# -*- coding: utf-8 -*-
+"""
+@author: Administrator
+"""
+
+import winsound
+import os
+import gc
+import time
+from datetime import datetime
+import pickle
+import geohash
+import numpy as np
+import pandas as pd
+from pandas import Series,DataFrame
+from sklearn.preprocessing import LabelEncoder
+from math import radians, cos, sin, atan2, degrees
+
+path='C:/Users/Administrator/Desktop/competition/mobike/online_offline'
+os.chdir(path)
+
+cache_path = 'mobike_cache_'
+train_path = 'C:/Users/Administrator/Desktop/competition/mobike/train.csv'
+test_path = 'C:/Users/Administrator/Desktop/competition/mobike/test.csv'
+flag = True
+
+def fill_hotloc(train,result):
+    hotloc_count=train.groupby(['geohashed_end_loc'],as_index=False)['userid'].agg({'hotloc_count':'count'})
+    hotloc=list(hotloc_count.sort_values(['hotloc_count']).tail(3).geohashed_end_loc)
+    
+    result['null_cnt'] = pd.isnull(result).sum(axis=1)
+    for i in range(0,len(result)):
+        if result.null_cnt[i]!=0:
+            to_fill = hotloc[0:result.null_cnt[i]]
+            if len(to_fill) !=  1:
+                result.iloc[i,-result.null_cnt[i]-2:3] = to_fill
+            else:
+                result.iloc[i,-result.null_cnt[i]-2:3] = to_fill[0]    
+    result.drop(['null_cnt'],axis=1,inplace=True)  
+    return result
+
+
+
+
+# 测评函数
+def map(result):
+    result_path = cache_path + 'true.pkl'
+    if os.path.exists(result_path):
+        true = pickle.load(open(result_path, 'rb+'))
+    else:
+        train = pd.read_csv(train_path)
+        test = pd.read_csv(test_path)
+        test['geohashed_end_loc'] = np.nan
+        merge = pd.concat([train,test])
+        true = dict(zip(merge['orderid'].values,merge['geohashed_end_loc']))
+        pickle.dump(true,open(result_path, 'wb+')) 
+    data = result.copy()
+    data['true'] = data['orderid'].map(true)
+    score = (sum(data['true']==data[0])
+             +sum(data['true']==data[1])/2
+             +sum(data['true']==data[2])/3)/data.shape[0]
+    return score
+
+
+def cal_distance(lat1,lon1,lat2,lon2):
+    dx = np.abs(lon1 - lon2)  
+    dy = np.abs(lat1 - lat2)  
+    b = (lat1 + lat2) / 2.0
+    Lx = 6371004.0 * (dx / 57.2958) * np.cos(b / 57.2958)
+    Ly = 6371004.0 * (dy / 57.2958)
+    L = (Lx**2 + Ly**2) ** 0.5
+    return L
+
+def get_degree(latA, lonA, latB, lonB):  
+    radLatA = radians(latA)  
+    radLonA = radians(lonA)  
+    radLatB = radians(latB)  
+    radLonB = radians(lonB)  
+    dLon = radLonB - radLonA  
+    y = sin(dLon) * cos(radLatB)  
+    x = cos(radLatA) * sin(radLatB) - sin(radLatA) * cos(radLatB) * cos(dLon)  
+    brng = degrees(atan2(y, x))  
+    brng = (brng + 360) % 360  
+    return brng  
+
+
+def rank(data, feat1, feat2, ascending):
+    data.sort_values([feat1,feat2],inplace=True,ascending=ascending)
+    data['rank'] = range(data.shape[0])
+    min_rank = data.groupby(feat1,as_index=False)['rank'].agg({'min_rank':'min'})
+    data = pd.merge(data,min_rank,on=feat1,how='left')
+    data['rank'] = data['rank'] - data['min_rank']
+    del data['min_rank']
+    return data
+
+
+def reshape(pred):
+    result = pred[['orderid','geohashed_end_loc','pred']].copy() #我小小改动了
+    result = rank(result,'orderid','pred',ascending=False)
+    result = result[result['rank']<3][['orderid','geohashed_end_loc','rank']]
+    #tao---针对三个变量时特别有用
+    result = result.set_index(['orderid','rank']).unstack()
+    result.reset_index(inplace=True)
+    result['orderid'] = result['orderid'].astype('int')
+    result.columns = ['orderid', 0, 1, 2]
+    return result
+
+
+
+
+def get_label(data):     
+    result_path = cache_path + 'true.pkl'
+    if os.path.exists(result_path):
+        true = pickle.load(open(result_path, 'rb+'))
+    else:
+        train = pd.read_csv(train_path)
+        test = pd.read_csv(test_path)   
+        test['geohashed_end_loc'] = np.nan
+        merge = pd.concat([train,test])
+        
+        true = dict(zip(merge['orderid'].values, merge['geohashed_end_loc']))
+        pickle.dump(true, open(result_path, 'wb+'))
+    data['label'] = data['orderid'].map(true)
+    data['label'] = (data['label'] == data['geohashed_end_loc']).astype('int')
+    return data
+
+
+
+def get_user_end_loc(train,test):
+    result_path = cache_path + 'user_end_loc_%d.hdf' %(train.shape[0]*test.shape[0])
+    if os.path.exists(result_path) & flag:
+        result = pd.read_hdf(result_path, 'w')
+    else:
+        user_eloc = train[['userid','geohashed_end_loc']].drop_duplicates()
+        result = pd.merge(test[['orderid','userid']],user_eloc,on='userid',how='left')
+        result = result[['orderid', 'geohashed_end_loc']]
+        result.to_hdf(result_path, 'w', complib='blosc', complevel=5)
+    return result
+
+
+def get_user_start_loc(train,test):
+    result_path = cache_path + 'user_start_loc_%d.hdf' %(train.shape[0]*test.shape[0])
+    if os.path.exists(result_path) & flag:
+        result = pd.read_hdf(result_path, 'w')
+    else:
+        user_sloc = train[['userid', 'geohashed_start_loc']].drop_duplicates()
+        result = pd.merge(test[['orderid', 'userid']], user_sloc, on='userid', how='left')
+        result.rename(columns={'geohashed_start_loc':'geohashed_end_loc'},inplace=True)
+        result = result[['orderid', 'geohashed_end_loc']]
+        result.to_hdf(result_path, 'w', complib='blosc', complevel=5)
+    return result
+
+def get_loc_to_loc(train,test):
+    result_path = cache_path + 'loc_to_loc_%d.hdf' %(train.shape[0]*test.shape[0])
+    if os.path.exists(result_path) & flag:
+        result = pd.read_hdf(result_path, 'w')
+    else:
+        sloc_eloc_count = train.groupby(['geohashed_start_loc', 'geohashed_end_loc'],as_index=False)['geohashed_end_loc'].agg({'sloc_eloc_count':'count'})
+        sloc_eloc_count.sort_values('sloc_eloc_count',inplace=True)
+        sloc_eloc_count = sloc_eloc_count.groupby('geohashed_start_loc').tail(3)
+        result = pd.merge(test[['orderid', 'geohashed_start_loc']], sloc_eloc_count, on='geohashed_start_loc', how='left')
+
+        result = result[['orderid', 'geohashed_end_loc']]   
+        result.to_hdf(result_path, 'w', complib='blosc', complevel=5)
+    return result
+
+
+
+
+def get_user_count(train,result):
+    
+    user_count = train.groupby('userid',as_index=False)['geohashed_end_loc'].agg({'user_count':'count'})
+    result = pd.merge(result,user_count,on=['userid'],how='left')
+    return result
+
+def get_user_eloc_count(train, result):
+    user_eloc_count = train.groupby(['userid','geohashed_end_loc'],as_index=False)['userid'].agg({'user_eloc_count':'count'})
+    result = pd.merge(result,user_eloc_count,on=['userid','geohashed_end_loc'],how='left')
+    return result
+
+def get_user_sloc_count(train,result):
+    user_sloc_count = train.groupby(['userid','geohashed_start_loc'],as_index=False)['userid'].agg({'user_sloc_count':'count'})
+    user_sloc_count.rename(columns={'geohashed_start_loc':'geohashed_end_loc'},inplace=True)
+    result = pd.merge(result, user_sloc_count, on=['userid', 'geohashed_end_loc'], how='left')
+    return result
+
+
+def get_user_sloc_eloc_count(train,result):
+    user_count = train.groupby(['userid','geohashed_start_loc','geohashed_end_loc'],as_index=False)['userid'].agg({'user_sloc_eloc_count':'count'})
+    result = pd.merge(result,user_count,on=['userid','geohashed_start_loc','geohashed_end_loc'],how='left')
+    return result
+
+
+def get_user_eloc_sloc_count(train,result):
+    user_eloc_sloc_count = train.groupby(['userid','geohashed_start_loc','geohashed_end_loc'],as_index=False)['userid'].agg({'user_eloc_sloc_count':'count'})
+    user_eloc_sloc_count.rename(columns = {'geohashed_start_loc':'geohashed_end_loc','geohashed_end_loc':'geohashed_start_loc'},inplace=True)
+    result = pd.merge(result,user_eloc_sloc_count,on=['userid','geohashed_start_loc','geohashed_end_loc'],how='left')
+    return result
+
+def get_distance_degree(result):
+    locs = list(set(result['geohashed_start_loc']) | set(result['geohashed_end_loc']))
+    if np.nan in locs:
+        locs.remove(np.nan)
+    deloc = []
+    for loc in locs:
+        deloc.append(geohash.decode_exactly(loc)[:2])
+    loc_dict = dict(zip(locs,deloc))
+    geohashed_loc = result[['geohashed_start_loc','geohashed_end_loc']].values
+    distance = []
+    degree = []
+    for i in geohashed_loc:
+        lat1, lon1 = loc_dict[i[0]]
+        lat2, lon2 = loc_dict[i[1]]
+        lat1,lon1,lat2,lon2=float(lat1),float(lon1),float(lat2),float(lon2)
+        distance.append(cal_distance(lat1,lon1,lat2,lon2))
+        degree.append(get_degree(lat1,lon1,lat2,lon2))
+    result.loc[:,'distance'] = distance
+    result.loc[:,'degree'] = degree
+    return result
+
+
+def get_eloc_count(train,result):
+    eloc_count = train.groupby('geohashed_end_loc', as_index=False)['userid'].agg({'eloc_count': 'count'})
+    result = pd.merge(result, eloc_count, on='geohashed_end_loc', how='left')
+    return result
+
+
+def get_eloc_as_sloc_count(train,result):
+    eloc_as_sloc_count = train.groupby('geohashed_start_loc', as_index=False)['userid'].agg({'eloc_as_sloc_count': 'count'})
+#    eloc_as_sloc_count.rename(columns={'geohashed_start_loc':'geohashed_end_loc'})
+    result = pd.merge(result, eloc_as_sloc_count, on='geohashed_start_loc', how='left')
+    return result
+
+
+def time_info(one_time):
+    d,h,m,s=time.strptime(one_time,"%Y-%m-%d %H:%M:%S")[2:6]
+    week=datetime.strptime(one_time,"%Y-%m-%d %H:%M:%S").weekday()+1
+    return d,h,m,s,week
+
+
+def get_time_features(data):
+    data['starttime']=data['starttime'].str.split('.').str[0]
+    a=DataFrame([(time_info(x)) for x in data.starttime],columns=['day','hour','minute','second','week'],index=data.index)
+    data=pd.concat([data,a],axis=1)
+    data['minute_c']=[(0<=x<30 and 1) or 0 for x in data['minute']]
+    data['hour_sec']=[str(x)+'_'+str(y) for x,y in zip(data['hour'],data['minute_c'])]
+    data['mor_aft_eve']=[(5<=x<11 and 1) or (11<=x<17 and 2) or 0 for x in data['hour']]
+    data['workday']=[(1<=x<6 and 1) or 0 for x in data['week']] 
+    le=LabelEncoder()
+    data['hour_sec']=le.fit_transform(data['hour_sec'])
+    return data
+
+
+def get_user_minute_c_count(train,result):
+    user_minute_c_count=train.groupby(['userid','minute_c'],as_index=False)['userid'].agg({'user_minute_c_count':'count'})
+    result=pd.merge(result,user_minute_c_count,on=['userid','minute_c'],how='left')
+    return result
+
+def get_user_hour_sec_count(train,result):
+    user_hour_sec_count=train.groupby(['userid','hour_sec'],as_index=False)['userid'].agg({'user_hour_sec_count':'count'})
+    result=pd.merge(result,user_hour_sec_count,on=['userid','hour_sec'],how='left')
+    return result
+
+def get_user_mor_aft_eve_count(train,result):
+    user_mor_aft_eve_count=train.groupby(['userid','mor_aft_eve'],as_index=False)['userid'].agg({'user_mor_aft_eve_count':'count'})
+    result=pd.merge(result,user_mor_aft_eve_count,on=['userid','mor_aft_eve'],how='left')
+    return result
+
+def get_user_workday_count(train,result):
+    user_workday_count=train.groupby(['userid','workday'],as_index=False)['userid'].agg({'user_workday_count':'count'})
+    result=pd.merge(result,user_workday_count,on=['userid','workday'],how='left')
+    return result
+
+def get_user_eloc_workday_count(train,result):
+    user_eloc_workday_count=train.groupby(['userid','geohashed_end_loc','workday'],as_index=False)['workday'].agg({'user_eloc_workday_count':'count'})
+    result=pd.merge(result,user_eloc_workday_count,on=['userid','geohashed_end_loc','workday'],how='left')
+    return result   
+
+def get_eloc_workday_count(train,result):
+    eloc_workday_count=train.groupby(['geohashed_end_loc','workday'],as_index=False)['workday'].agg({'eloc_workday_count':'count'})
+    result=pd.merge(result,eloc_workday_count,on=['geohashed_end_loc','workday'],how='left')
+    return result
+
+
+
+
+
+def get_sample(train,test):
+    result_path = cache_path + 'sample_%d.hdf' % (train.shape[0] * test.shape[0])
+    if os.path.exists(result_path) & flag:
+        result = pd.read_hdf(result_path, 'w')
+    else:
+        user_end_loc = get_user_end_loc(train, test)      # 根据用户历史目的地点添加样本 ['orderid', 'geohashed_end_loc', 'n_user_end_loc']
+        user_start_loc = get_user_start_loc(train, test)  # 根据用户历史起始地点添加样本 ['orderid', 'geohashed_end_loc', 'n_user_start_loc']
+        loc_to_loc = get_loc_to_loc(train, test)          # 筛选起始地点去向（终点）最多的3个地点
+        result = pd.concat([user_end_loc[['orderid','geohashed_end_loc']],
+                            user_start_loc[['orderid', 'geohashed_end_loc']],
+                            loc_to_loc[['orderid', 'geohashed_end_loc']],  
+                            ]).drop_duplicates()
+       
+        test_temp = test.copy()
+        test_temp.rename(columns={'geohashed_end_loc': 'label'}, inplace=True)
+        result = pd.merge(result, test_temp, on='orderid', how='left')
+        result['label'] = (result['label'] == result['geohashed_end_loc']).astype(int)
+        result = result[result['geohashed_end_loc'] != result['geohashed_start_loc']]
+        result = result[(~result['geohashed_end_loc'].isnull()) & (~result['geohashed_start_loc'].isnull())]
+        result.to_hdf(result_path, 'w', complib='blosc', complevel=5)
+    return result
+
+def make_train_set(train,test):
+    result_path = 'data_set_fixed_feature_%d.hdf' % (train.shape[0] * test.shape[0])
+    if os.path.exists(result_path) & flag:
+        result = pd.read_hdf(result_path, 'w')
+        print('已添加时间特征...')
+        print('已构造样本...')
+        print('已构造特征...')
+        print('result.columns:\n{}'.format(result.columns))
+        print('已添加真实label')
+        print('构造完毕')
+    else:   
+        print('开始添加时间特征...')
+        train = get_time_features(train)
+        test = get_time_features(test)
+        print('开始构造样本...')
+        result = get_sample(train,test)                                         # 构造备选样本
+    
+        print('开始构造特征...')
+        result = get_user_count(train,result)                                   # 获取用户历史行为次数
+        result = get_user_eloc_count(train, result)                             # 获取用户去过这个地点几次
+        result = get_user_sloc_count(train, result)                             # 获取用户从目的地点出发过几次
+        result = get_user_sloc_eloc_count(train, result)                        # 获取用户从这个路径走过几次
+        result = get_user_eloc_sloc_count(train, result)                        # 获取用户从这个路径折返过几次
+       
+        result = get_distance_degree(result)                                    # 获取起始点和最终地点的欧式距离
+        result = get_eloc_count(train, result)                                  # 获取目的地点的热度(目的地)
+        result = get_eloc_as_sloc_count(train, result)                          # 获取目的地点的热度(出发地)
+
+        result = get_user_minute_c_count(train,result)
+        result = get_user_hour_sec_count(train,result)
+        result = get_user_mor_aft_eve_count(train,result)
+        result = get_user_workday_count(train,result)
+        result = get_user_eloc_workday_count(train,result)
+        result = get_eloc_workday_count(train,result)
+        result.fillna(0,inplace=True)
+        print('result.columns:\n{}'.format(result.columns))
+        print('添加真实label...')
+        result = get_label(result)
+        result.to_hdf(result_path, 'w', complib='blosc', complevel=5)
+        print('构造完毕')
+
+    return result
+
+
+import lightgbm as lgb
+
+params = {
+    'boosting_type': 'gbdt',
+    'objective': 'binary',
+    'metric': 'auc',
+    'num_leaves': 63,
+    'learning_rate': 0.1,  
+    'feature_fraction': 0.8, 
+    'bagging_fraction': 0.8,
+    'bagging_freq': 5,
+    'min_data_in_leaf': 50, # default=20
+    'min_sum_hessian_in_leaf': 5, 
+    'verbose': 0 ,
+    'seed': 201708,
+    'scale_pos_weight': 10
+}
+
+is_online=1
+
+if is_online:
+    t0 = time.time()
+    train = pd.read_csv(train_path)
+    test = pd.read_csv(test_path)
+    #train=get_time_features(train)
+    #test=get_time_features(test)
+    train1 = train[(train['starttime'] < '2017-05-22 00:00:00')]
+    train2 = train[(train['starttime'] >= '2017-05-22 00:00:00')]
+    #train1 = train[(train['starttime'] < '2017-05-23 00:00:00')]
+    #train2 = train[(train['starttime']>= '2017-05-23 00:00:00')]
+    #train2.loc[:,'geohashed_end_loc'] = np.nan
+    test.loc[:,'geohashed_end_loc'] = np.nan
+    
+    print('构造训练集')  
+    train_feat = make_train_set(train1,train2)
+    train_feat=train_feat[train_feat.distance<=8000]
+
+    print('构造线上测试集')
+    test_feat = make_train_set(train,test)
+    del train,test,train1,train2
+    
+    predictors=['user_count', 'user_eloc_count', 'user_sloc_count',
+       'user_sloc_eloc_count', 'distance', 'degree',
+       'eloc_count', 'eloc_as_sloc_count', 'user_minute_c_count',
+       'user_hour_sec_count', 'user_mor_aft_eve_count', 'user_workday_count',
+       'user_eloc_workday_count', 'eloc_workday_count']
+    
+    train_X=train_feat[predictors]
+    train_y=train_feat['label']
+    test_X=test_feat[predictors]
+    test_y=test_feat['label']
+    
+    lgbtrain = lgb.Dataset(train_X, train_y)
+    lgbtest = lgb.Dataset(test_X,test_y,reference=lgbtrain)
+    del train_feat,train_X,train_y
+    
+    gbm = lgb.train(params, lgbtrain, num_boost_round=200,verbose_eval=10, 
+                    valid_sets=[lgbtrain],early_stopping_rounds=10)
+                    
+    
+    del lgbtrain
+    gc.collect()
+    
+    test_feat.loc[:,'pred'] = gbm.predict(test_X)
+    result = reshape(test_feat)
+    test = pd.read_csv(test_path)
+    result = pd.merge(test[['orderid']],result,on='orderid',how='left')
+   
+    result.fillna('0',inplace=True)
+    
+    result.to_csv('result.csv',index=False,header=False)
+    import zipfile
+    with zipfile.ZipFile("result.zip", "w") as fout:
+        fout.write("result.csv", compress_type=zipfile.ZIP_DEFLATED)
+    print('一共用时{}秒'.format(time.time()-t0))
+    winsound.PlaySound('SystemExclamation',winsound.SND_ALIAS)
+    
+else:
+    t0 = time.time()
+    train = pd.read_csv(train_path)
+    train1 = train[(train['starttime'] < '2017-05-19 00:00:00')]
+    train2 = train[(train['starttime'] >= '2017-05-19 00:00:00')&(train['starttime'] < '2017-05-23 00:00:00')]
+    train1_2 = train[(train['starttime'] < '2017-05-23 00:00:00')]
+    train3 = train[(train['starttime'] >= '2017-05-23 00:00:00')] 
+    del train
+    train3.loc[:,'geohashed_end_loc'] = np.nan
+    #test.loc[:,'geohashed_end_loc'] = np.nan
+    
+    print('构造训练集')
+    train_feat = make_train_set(train1,train2)
+    #train_feat.to_hdf('train_feat_0828.hdf', 'w', complib='blosc', complevel=5)
+    train_feat=train_feat[train_feat.distance<=8000]
+
+    print('构造线下测试集')
+    test_feat = make_train_set(train1_2,train3)
+
+    del train1_2,train1,train2 
+    predictors =  [ 'hour',  'degree',
+       'user_count', 'user_eloc_count', 'user_sloc_count',
+       'user_sloc_eloc_count',  'distance',
+       'eloc_count', 'eloc_as_sloc_count', 'user_minute_c_count',
+       'user_hour_sec_count', 'user_mor_aft_eve_count', 'user_workday_count',
+       'user_eloc_workday_count', 'eloc_workday_count']
+    
+    train_X=train_feat[predictors]
+    train_y=train_feat['label']
+    test_X=test_feat[predictors]
+    test_y=test_feat['label']
+    
+    lgbtrain = lgb.Dataset(train_X, train_y)
+    lgbtest = lgb.Dataset(test_X,test_y,reference=lgbtrain)
+    del train_feat,train_X,train_y
+    
+    gbm = lgb.train(params, lgbtrain, num_boost_round=120,verbose_eval=10, 
+                    valid_sets=[lgbtest],early_stopping_rounds=10)
+                    
+    
+    del lgbtrain
+    gc.collect()
+    
+    test_feat.loc[:,'pred'] = gbm.predict(test_X)
+    result = reshape(test_feat)
+    
+    #test = pd.read_csv(test_path)
+    result = pd.merge(train3[['orderid']],result,on='orderid',how='left')
+    result.fillna('0',inplace=True)
+    result.to_csv('result_offline.csv',index=False,header=False)
+    fet_value=dict(zip(gbm.feature_name(),gbm.feature_importance()))
+    print(sorted(fet_value.items(), key=lambda e:e[1], reverse=True))
+    print('score: {}'.format(map(result))) 
+    print('一共用时{}秒'.format(time.time()-t0))
+    winsound.PlaySound('SystemExclamation',winsound.SND_ALIAS)
+    
